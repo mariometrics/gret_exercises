@@ -1,4 +1,5 @@
 # logged commands
+include PPtest.gfn
 open cons_gdp.gdt
 
 ## preliminar transformation

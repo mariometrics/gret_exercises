@@ -1,5 +1,6 @@
 ### Es VAR coint su imp e exp (bilancia commerciale)
 open ImpExp_USA.gdt
+include PPtest.gfn
 
 smpl 1970:1
 
