@@ -1,0 +1,60 @@
+### try multivariate garch with seven stocks 
+
+# turn off unwanted output
+set echo off
+set messages off
+clear
+open HI_TECH_NASDAQ7.gdt --quiet
+
+# edit at will
+
+list Prices = AAPL MSFT NFLX TSLA INTC AMZN FB 
+
+# plot series 
+scatters Prices --time-series --output=display
+
+# compute returns
+
+list Returns = null
+loop foreach i Prices --quiet
+    series r_$i = 100 * ldiff($i)
+    Returns += r_$i
+endloop
+
+set stopwatch
+include MGARCH.gfn
+
+# setup the BEKK model 
+
+scalar VAR_lags = 0
+list VAR_exog = const
+
+scalar verbosity = 0 # set to 1 for info on the MLE iterations
+bundle Model = BEKK_setup(Returns, VAR_lags, VAR_exog)
+
+set bfgs_verbskip 10
+# estimate 
+BEKK_estimate(&Model, verbosity)
+
+# print out the results 
+BEKK_printout(&Model)
+
+# compute the conditional variances
+# scalar k = 1
+# loop foreach i Prices --quiet
+#     series cv_$i = GetVariance(&Model, k++)
+# endloop
+
+# get the conditional covariance 
+loop foreach i Prices
+    loop foreach j Prices
+        if i > j
+            series covar_$i_$j = GetCovariance(&Model, i, j)
+            #gnuplot covar_$i_$j --time-series --with-lines --output=display { set title "Covariance between $i & $j over time"; set ylabel "Covariance"; }
+        endif
+    endloop
+endloop
+list COVAR = covar*
+printf "\n"
+
+printf "Elapsed time = %g minutes\n", $stopwatch/60

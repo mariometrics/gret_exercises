@@ -1,0 +1,1112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gretl-functions>
+<gretl-function-package name="MGARCH" ID="1493393133" needs-time-series-data="true" minver="2016c" lives-in-subdir="true">
+<author email="r.lucchetti@univpm.it">Riccardo &quot;Jack&quot; Lucchetti</author>
+<version>0.3</version>
+<date>2017-04-27</date>
+<description>Multivariate GARCH models</description>
+<tags>C32 C58</tags>
+<label>Multivariate GARCH</label>
+<menu-attachment>MAINWIN/Model/TSModels</menu-attachment>
+<help filename="MGARCH.txt">
+This is a brief help file for the MGARCH package.
+
+The package is not at all complete; I decided to release it just in
+order to give people something we can collectively build upon
+(&quot;release early, release often&quot;). At the moment it just handles
+unrestricted BEKK models (with analytical derivatives). All you can do
+is estimation and computation of conditional covariances. No 
+forecasting yet, though it's in the plans. Also planned is the
+implementation of DCC models, restricted BEKK models (this should be
+easy, the infrastructure is in place already) and possibly more exotic
+stuff. Another missing item is pdf documentation. Hey, it's 0.3.
+
+Available functions are, as of now:
+
+--------------------------------------------------------------------------
+BEKK_setup: Sets up a BEKK model. Takes 3 parameters:
+
+- a list of dependent series
+- a scalar for the number of lags in mean
+- a list (possibly null) of explanatory variables for the mean.
+
+No regressors in variance (yet) 
+
+Returns a bundle.
+--------------------------------------------------------------------------
+BEKK_estimate: estimates the parameters via MLE. Takes the model
+bundle (in pointer form)as its only parameter. At present, there's no
+provision for QMLE estimation. Standard errors can be computed via
+OPG, inverse Hessian or QMLE (default). In order to choose between
+available options, set a scalar named &quot;vcvtype&quot; equal to 1, 2, or 3
+before calling the function.
+--------------------------------------------------------------------------
+BEKK_printout: prints the estimates. Takes the model bundle (in
+pointer form) as its only parameter
+--------------------------------------------------------------------------
+GetVariance: fetches a series with the estimated conditional
+variance for one of the series in the model. Takes 2 arguments:
+- the model bundle (in pointer form)
+- the ordinal number of the wanted variable in the dependent list
+--------------------------------------------------------------------------
+GetCovariance: fetches a series with the estimated conditional
+covariance for two of the series in the model. Takes 3 arguments:
+- the model bundle (in pointer form)
+- the two ordinal numbers of the wanted variables in the dependent list
+--------------------------------------------------------------------------
+GetResids: fetches a series with the estimated residuals for one
+of the series in the model. Takes 3 arguments:
+- the model bundle (in pointer form)
+- the ordinal number of the wanted variables in the dependent list
+- a Boolean optional flag to yield the standardised version (default = NO)
+--------------------------------------------------------------------------
+GetLoglik: fetches a series with the estimated loglikelihood. Takes
+one argument, the model bundle (in pointer form).
+--------------------------------------------------------------------------
+
+After successful completion of estimation, notable bundle elements
+that you might want to extract for further computations are:
+
+T	sample size
+n	number of series
+coeff	coefficient vector
+vcv	covariance matrix for coeff
+mats	array of system matrices
+ht	matrix with the covariance matrix sequence (T rows)
+
+CHANGELOG:
+
+0.1  -&gt; 0.11: get rid of &quot;=&quot; as a Boolean operator as per new policy
+0.11 -&gt; 0.12: fix the &quot;X == null&quot; case
+0.12 -&gt; 0.2 : Add GetResids, update the JEL codes, use QML as default
+              vcv type
+0.2  -&gt; 0.3 : Add GetLoglik, add GUI hook, remove some dead code
+</help>
+<data-files count="1">
+examples </data-files>
+<gretl-function name="BEKK_setup" type="bundle">
+ <params count="3">
+  <param name="Y" type="list"/>
+  <param name="p" type="scalar"/>
+  <param name="X" type="list"/>
+ </params>
+<code>/*
+Initialises the bundle.
+*/
+bundle ret
+ret.type = &quot;BEKK&quot;
+/*
+store data matrices and fix basic dimensions
+*/
+ndet = nelem(X)
+series BEKKsmpl = ok(Y)
+if ndet &gt; 0
+  BEKKsmpl = BEKKsmpl &amp;&amp; ok(X)
+endif
+ret.Ynames = varname(Y)
+ret.smpl = BEKKsmpl
+smpl BEKKsmpl --dummy # FIXME: possibly, simplify via --contiguous
+scalar n = nelem(Y)
+scalar n2 = n*n
+nupper = (n2 + n)/2
+inmean = 0
+loop foreach i n nupper p inmean --quiet
+  scalar ret.$i = $i
+endloop
+ret.vcvtype = 3 # default = QML
+# data matrices
+matrix mY = {Y}
+matrix localX = ndet &gt; 0 ? {X} :  {}
+if p &gt; 0
+  matrix localX ~= mlag(mY,seq(1,p))
+endif
+k = cols(localX)
+matrix ret.X = k &gt; 0 ? localX[p+1:,] : {}
+matrix ret.Y = mY[p+1:,]
+scalar T = rows(ret.Y)
+ret.T = T
+nparm = n*k
+if inmean == 1
+  nparm += n * nupper
+endif
+nparv = (nupper + 2*n2)
+npar  = nparm + nparv
+loop foreach i k nparm nparv npar -q
+  ret.$i = $i
+endloop
+/*
+set active elements: by default, we leave
+everything unconstrained, except we have no
+&quot;in-mean&quot; part
+*/
+ret.active = zeros(npar, 1)
+if k&gt;0
+  BEKK_SetActive(&amp;ret, &quot;Pi&quot;, ones(k, n))
+endif
+BEKK_SetActive(&amp;ret, &quot;C&quot;, ones(n, n))
+BEKK_SetActive(&amp;ret, &quot;A&quot;, ones(n, n))
+BEKK_SetActive(&amp;ret, &quot;B&quot;, ones(n, n))
+scalar ret.nactiveparams = sumc(ret.active)
+/*
+initialize parameters
+*/
+# Method for H_0
+# 0: OLS, 1: EPS, 2:UNC, 3: MIN
+SetInitMethod(&amp;ret, 0)
+matrix E
+if ndet&gt;0
+  matrix Pi = mols(ret.Y, ret.X, &amp;E)
+else
+  matrix Pi = {}
+  E = ret.Y
+endif
+matrix C = 0.05 * cholesky(mcov(E))
+matrix Phi = {}
+matrix A = 0.4*I(n)
+matrix B = 0.9*I(n)
+matrix ret.fulltheta = BEKK_m2v(Pi', Phi, C, A, B)
+printf &quot;Starting values&quot;
+loop foreach i Pi C A B --quiet
+  printf &quot;\n$i:\n%12.6f\n&quot;, $i
+endloop
+/*
+prepare storage space
+*/
+# matrix ret.Ht = zeros(T, nupper)
+# matrix ret.Pt = zeros(T, nupper)
+return ret
+</code>
+</gretl-function>
+<gretl-function name="BEKK_estimate" type="scalar">
+ <params count="2">
+  <param name="mod" type="bundleref"/>
+  <param name="verbose" type="int" min="0" default="0"/>
+ </params>
+<code>matrix ll
+series Smpl = mod.smpl
+smpl Smpl --dummy
+matrix param = mod.fulltheta
+scalar err = 0
+string mleopt = &quot;--quiet&quot;
+if verbose &gt; 0
+  set max_verbose on
+  set bfgs_verbskip verbose
+  string mleopt = &quot;--verbose&quot;
+endif
+scalar npar = rows(param)
+matrix G
+loop foreach i n k T inmean nupper --quiet
+  scalar $i = mod.$i
+endloop
+matrix Hts = zeros(T, nupper)
+matrix Pts = zeros(T, nupper)
+set stopwatch
+catch BFGSmax(param, &quot;loglik_T(param, &amp;mod, &amp;err, &amp;Hts, &amp;Pts)&quot;, &quot;Score_T(&amp;G, param, &amp;mod, Hts, Pts)&quot;)
+if $error&gt;0
+  scalar err = $error
+  printf &quot;Error! (error code = %d)\n&quot;, err
+endif
+mod.coeff = param
+G = BEKKScore(param, &amp;mod, Hts, Pts, 0, 0)
+mod.G = G
+mod.vcv = CovarianceMat(&amp;mod)
+matrix E
+series logl
+if err==0
+  matrix Pi Phi C A B
+  BEKK_v2m(param, n, k, inmean, &amp;Pi, &amp;Phi, &amp;C, &amp;A, &amp;B)
+  matrix E = (k&gt;0) ? mod.Y - mod.X*Pi' : mod.Y
+  matrix mod.llt = BEKKloglik(param, &amp;mod, &amp;err, &amp;Hts, &amp;Pts)
+  matrix mod.uhat = E
+  matrix mod.ht = Hts
+  matrices mod.mats = defarray(Pi, Phi, C, A, B)
+  matrix ndx = cum(seq(1,n)')
+  matrix mod.stduhat = E ./ sqrt(Hts[,ndx])
+endif
+return err
+</code>
+</gretl-function>
+<gretl-function name="BEKK_printout" type="void">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>n = b.n
+k = b.k
+matrix Pi Phi C A B
+matrix theta = b.coeff
+npar = rows(theta)
+if inbundle(b, &quot;vcv&quot;)
+  se = sqrt(diag(b.vcv))
+else
+  se = ones(npar,1) .* NA
+endif
+string vcvtype = (b.vcvtype == 1) ? &quot;OPG&quot; : (b.vcvtype == 2) ? &quot;Inverse Hessian&quot; : (b.vcvtype == 3) ? &quot;QMLE (Sandwich)&quot; : &quot;Unknown&quot;
+printf &quot;\n\nBEKK Model --- vcvtype = %s\n&quot;, vcvtype
+if k &gt; 0
+  coef = GetMatrix(theta, &amp;b, &quot;Pi&quot;)
+  ster = GetMatrix(se, &amp;b, &quot;Pi&quot;)
+  modprint_matrix(coef, &quot;Pi&quot;, ster)
+  printf &quot;\n&quot;
+endif
+loop foreach i C A B --quiet
+  coef = GetMatrix(theta, &amp;b, &quot;$i&quot;)
+  ster = GetMatrix(se, &amp;b, &quot;$i&quot;)
+  modprint_matrix(coef, &quot;$i&quot;, ster)
+  printf &quot;\n&quot;
+endloop
+printf &quot;Sample size = %d\n&quot;, b.T
+printf &quot;Average loglikelihood = %g\n\n&quot;, meanc(b.llt)
+</code>
+</gretl-function>
+<gretl-function name="GetVariance" type="series">
+ <params count="2">
+  <param name="b" type="bundleref"/>
+  <param name="x" type="scalar"/>
+ </params>
+<code>series ret = NA
+if b.type == &quot;BEKK&quot;
+  ret = BEKK_GetCovariance(&amp;b, x, x)
+endif
+return ret
+</code>
+</gretl-function>
+<gretl-function name="GetCovariance" type="series">
+ <params count="3">
+  <param name="b" type="bundleref"/>
+  <param name="x" type="scalar"/>
+  <param name="y" type="scalar"/>
+ </params>
+<code>series ret = NA
+if b.type == &quot;BEKK&quot;
+  ret = BEKK_GetCovariance(&amp;b, x, y)
+endif
+return ret
+</code>
+</gretl-function>
+<gretl-function name="GetResids" type="series">
+ <params count="3">
+  <param name="b" type="bundleref"/>
+  <param name="x" type="scalar"/>
+  <param name="std" type="bool" default="0"/>
+ </params>
+<code>series ret = NA
+if b.type == &quot;BEKK&quot;
+  ret = BEKK_GetResids(&amp;b, x, std)
+endif
+return ret
+</code>
+</gretl-function>
+<gretl-function name="GetLoglik" type="series">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>series ret = NA
+if b.type == &quot;BEKK&quot;
+  ret = BEKK_GetLoglik(&amp;b)
+endif
+return ret
+</code>
+</gretl-function>
+<gretl-function name="GUI_MGARCH" type="bundle" pkg-role="gui-main">
+ <params count="7">
+  <param name="modeltype" type="int" min="1" max="1">
+<description>Model type</description>
+<labels count="1">
+"BEKK" </labels>
+  </param>
+  <param name="Y" type="list">
+<description>Dependent variable list</description>
+  </param>
+  <param name="X" type="list" optional="true">
+<description>Conditional mean regressors</description>
+  </param>
+  <param name="p" type="int" min="0" default="1">
+<description>Lags</description>
+  </param>
+  <param name="hasconst" type="bool" default="1">
+<description>Constant in mean</description>
+  </param>
+  <param name="vcvtype" type="int" min="1" max="3" default="3">
+<description>VCV type</description>
+<labels count="3">
+"OPG" "Hessian" "QMLE" </labels>
+  </param>
+  <param name="verbosity" type="int" min="0" default="1">
+<description>Show params every n iterations</description>
+  </param>
+ </params>
+<code>if hasconst
+  X = const || X
+endif
+bundle Model = BEKK_setup(Y, p, X)
+Model.vcvtype = vcvtype
+BEKK_estimate(&amp;Model, verbosity)
+BEKK_printout(&amp;Model)
+return Model
+</code>
+</gretl-function>
+<gretl-function name="N2_ify" type="matrix" private="1">
+ <params count="2">
+  <param name="A" type="matrix" const="true"/>
+  <param name="n" type="scalar"/>
+ </params>
+<code>sel = vec(mshape(seq(1,n*n),n,n)')
+return (A + A[sel,])
+</code>
+</gretl-function>
+<gretl-function name="L_ify" type="matrix" private="1">
+ <params count="2">
+  <param name="A" type="matrix" const="true"/>
+  <param name="n" type="scalar"/>
+ </params>
+<code>sel = seq(1,n*n)
+sel = vech(mshape(sel,n,n)') # maybe not transposed?
+return A[sel,]
+</code>
+</gretl-function>
+<gretl-function name="is_pd" type="scalar" private="1">
+ <params count="1">
+  <param name="A" type="matrix" const="true"/>
+ </params>
+<code># check for positive definiteness via
+# generalised Cholesky decomposition
+# note: A is NOT checked for symmetry
+set warnings off
+k = diag(psdroot(A))
+return minc(ok(k))
+</code>
+</gretl-function>
+<gretl-function name="modprint_matrix" type="void" private="1">
+ <params count="3">
+  <param name="A" type="matrix"/>
+  <param name="name" type="string"/>
+  <param name="seA" type="matrix"/>
+ </params>
+<code>scalar r = rows(A)
+scalar c = cols(A)
+string parstr = &quot;&quot;
+k = 1
+last = r*c
+loop i=1..c -q
+  loop j=1..r -q
+    sprintf tmp &quot;%s[%2d %2d]&quot;, name, j, i
+    parstr ~= tmp
+    if k&lt;last
+      parstr ~= &quot;,&quot;
+    endif
+    k++
+  endloop
+endloop
+matrix cs = vec(A) ~ vec(seA)
+modprint cs parstr
+</code>
+</gretl-function>
+<gretl-function name="GetMatrix" type="matrix" private="1">
+ <params count="3">
+  <param name="x" type="matrix"/>
+  <param name="b" type="bundleref"/>
+  <param name="s" type="string"/>
+ </params>
+<code>n = b.n
+k = b.nparm
+n2 = n*n
+m = (n2+n)/2
+if s==&quot;Pi&quot;
+  ini = 1
+  fin = k
+  r = k/n
+elif s==&quot;Phi&quot;
+  ini = k+1
+  fin = k+m*n
+  r = m
+elif s==&quot;C&quot;
+  ini = k+1
+  fin = k+m
+elif s==&quot;A&quot;
+  ini = k+m+1
+  fin = k+m+n2
+  r = n
+elif s==&quot;B&quot;
+  ini = k+m+n2+1
+  fin = k+m+n2*2
+  r = n
+endif
+if s == &quot;C&quot;
+  return lower(unvech(x[ini:fin]))
+else
+  return mshape(x[ini:fin],r,n)
+endif
+</code>
+</gretl-function>
+<gretl-function name="BEKK_m2v" type="matrix" private="1">
+ <params count="5">
+  <param name="Pi" type="matrix" const="true"/>
+  <param name="Phi" type="matrix" const="true"/>
+  <param name="C" type="matrix" const="true"/>
+  <param name="A" type="matrix" const="true"/>
+  <param name="B" type="matrix" const="true"/>
+ </params>
+<code>return vec(Pi) | vec(Phi) | vech(C') | vec(A) | vec(B)
+</code>
+</gretl-function>
+<gretl-function name="BEKK_v2m" type="void" private="1">
+ <params count="9">
+  <param name="theta" type="matrix" const="true"/>
+  <param name="n" type="scalar"/>
+  <param name="k" type="scalar"/>
+  <param name="inmean" type="scalar"/>
+  <param name="Pi" type="matrixref"/>
+  <param name="Phi" type="matrixref"/>
+  <param name="C" type="matrixref"/>
+  <param name="A" type="matrixref"/>
+  <param name="B" type="matrixref"/>
+ </params>
+<code>n2 = n*n
+nupper = (n2 + n)/2
+ini = 1
+fin = n*k
+if k&gt;0
+  Pi = mshape(theta[ini:fin],n,k)
+endif
+if inmean==1
+  ini = fin+1
+  fin += n*nupper
+  Phi = mshape(theta[ini:fin],n,nupper)
+endif
+ini = fin+1
+fin += nupper
+C = lower(unvech(theta[ini:fin]))
+ini = fin+1
+fin += n2
+A = mshape(theta[ini:fin],n,n)
+ini = fin+1
+fin += n2
+B = mshape(theta[ini:fin],n,n)
+</code>
+</gretl-function>
+<gretl-function name="SetInitMethod" type="void" private="1">
+ <params count="2">
+  <param name="b" type="bundleref"/>
+  <param name="method" type="scalar"/>
+ </params>
+<code>n = b.n
+matrix b.e0 = zeros(1, n)
+matrix b.Jz0 = zeros(n*(n+1), b.npar)
+# maybe we could have an &quot;nparam&quot; scalar
+matrix b.ScoreCols = ones(1, b.nparm) ~ vec(lower(ones(n,n)))' ~ ones(1,2*n*n)
+if method == 0 # OLS
+  if cols(b.X) &gt; 0
+    matrix E
+    mols(b.Y, b.X, &amp;E)
+    matrix b.H0 = mcov(E)
+  else
+    matrix b.H0 = mcov(b.Y)
+  endif
+else
+  matrix b.H0 = zeros(n, n)
+endif
+b.InitMeth = method
+</code>
+</gretl-function>
+<gretl-function name="UpdatePresampleState" type="void" private="1">
+ <params count="5">
+  <param name="b" type="bundleref"/>
+  <param name="E" type="matrixref"/>
+  <param name="A" type="matrix" const="true"/>
+  <param name="B" type="matrix" const="true"/>
+  <param name="C" type="matrix" const="true"/>
+ </params>
+<code>/* this function writes into the model bundle the quantities
+needed to initialise the loglik abd the score, that is
+e0, H0 and Jz0
+*/
+matrix tmp bigmat H0
+n = b.n
+nparm = b.nparm
+n2 = n*n
+b.e0 = zeros(1, n)
+matrix ScoreCols = ones(1,nparm) ~ vec(lower(ones(n,n)))' ~ ones(1,2*n*n)
+if b.InitMeth == 1 # INIT_EPS
+  if b.inmean == 1
+    printf &quot;Warning! InitMeth==INIT_EPS not applicable to in-mean models!&quot;
+  endif
+  scalar T = b.T
+  nparams = b.npar
+  matrix b.H0 = mcov(E)
+  matrix tmp = -(E'b.X) ./T
+  matrix tmp = N2_ify(I(n) ** -tmp,n) ~ zeros(n*n, b.nparv)
+  tmp = zeros(n,cols(tmp)) | tmp
+  matrix b.Jz0 = tmp
+elif b.InitMeth &gt; 1
+  if b.InitMeth == 2 # INIT_UNC
+    matrix tmp = C*C'
+    matrix bigmat = inv(I(n*n) - A**A - B**B)
+    H0 = mshape(bigmat*vec(tmp), n, n)
+    matrix b.H0 = H0
+    matrix tmp = N2_ify((C~(A*H0)~(B*H0)) ** I(n), n)
+    matrix tmp = bigmat * tmp
+  elif b.InitMeth == 3 # INIT_MIN
+    matrix b.H0 = C*C'
+    matrix tmp = N2_ify((C~zeros(n,2*n)) ** I(n), n)
+  endif
+  matrix tmp = diagcat(zeros(n, b.nparm), tmp)
+  matrix b.Jz0 = selifc(tmp, ScoreCols)
+endif
+</code>
+</gretl-function>
+<gretl-function name="BEKKloglik" type="matrix" private="1">
+ <params count="5">
+  <param name="acttheta" type="matrix"/>
+  <param name="b" type="bundleref"/>
+  <param name="err" type="scalarref"/>
+  <param name="Hts" type="matrixref"/>
+  <param name="Pts" type="matrixref"/>
+ </params>
+<code>loop foreach i n p npar nparm k T inmean --quiet
+  scalar $i = b.$i
+endloop
+set warnings off
+matrix ll_NA = ones(T,1) .* NA
+matrix LL = ll_NA
+matrix Pi Phi C A B
+# for now
+matrix fulltheta = acttheta
+# matrix fulltheta = Active2Total(acttheta, b.S, b.s)
+BEKK_v2m(fulltheta, n, k, inmean, &amp;Pi, &amp;Phi, &amp;C, &amp;A, &amp;B)
+#matrix BoB = B ** B
+matrix tmp = eigengen(B)
+check = maxc(sumr(tmp.^2))
+if check &gt; 1
+  scalar err = -1
+  return {}
+endif
+matrix E = (k&gt;0) ? b.Y - b.X*Pi' : b.Y
+UpdatePresampleState(&amp;b, &amp;E, A, B, C)
+matrix et = b.e0
+matrix Ht = b.H0
+matrix CC = C*C'
+lik_const = -.9189385332046727417803297364 * n
+err = 0
+loop t = 1..T --quiet
+  matrix Aelag = A*et'
+  matrix Ht = CC + Aelag*Aelag' + qform(B, Ht)
+  scalar detHt = det(Ht)
+  if detHt &lt;= 1.0e-30
+    scalar err = t
+    # printf &quot;Nonpd at obs %d\n&quot;, err
+    matrix LL = ll_NA
+    break
+  endif
+  # catch matrix Pt = invpd(Ht)
+  # scalar err = $error
+  # if err &gt; 0
+  #     printf &quot;Nonpd at obs %d\n&quot;, t
+  #     scalar err = t
+  #     matrix LL = ll_NA
+  #     break
+  # endif
+  matrix Pt = invpd(Ht)
+  Hts[t,] = vech(Ht)'
+  Pts[t,] = vech(Pt)'
+  matrix et = E[t,]
+  if inmean == 1
+    et -= Phi*vech(Ht)
+  endif
+  LL[t] = lik_const - 0.5*(ln(detHt) + qform(et, Pt))
+endloop
+return LL
+</code>
+</gretl-function>
+<gretl-function name="BEKKScore" type="matrix" private="1">
+ <params count="6">
+  <param name="acttheta" type="matrix"/>
+  <param name="b" type="bundleref"/>
+  <param name="Hts" type="matrix" const="true"/>
+  <param name="Pts" type="matrix" const="true"/>
+  <param name="full" type="bool"/>
+  <param name="total" type="bool"/>
+ </params>
+<code>/*
+acttheta: parameters
+b: pointer to BEKK bundle
+Hts: sequence of covariance matrices (read-only if !full)
+Pts: sequence of covariance inverses (read-only if !full)
+full: recompute the Ht/Pt sequence
+total: just the sum of gradients vs the full G matrix
+*/
+loop foreach i n p npar nparm k T inmean --quiet
+  scalar $i = b.$i
+endloop
+scalar n2 = n*n
+matrix X = b.X
+set warnings off
+matrix G = zeros(T, npar)
+matrix Pi Phi C A B
+# for now
+matrix fulltheta = acttheta
+# matrix fulltheta = Active2Total(acttheta, b.S, b.s)
+BEKK_v2m(fulltheta, n, k, inmean, &amp;Pi, &amp;Phi, &amp;C, &amp;A, &amp;B)
+#     matrix tmp = eigengen(B)
+#     check = maxc(sumr(tmp.^2))
+#     if check &gt; 1
+#         return G
+#     endif
+matrix E = (k&gt;0) ? b.Y - X*Pi' : b.Y
+UpdatePresampleState(&amp;b, &amp;E, A, B, C)
+matrix elag = b.e0
+matrix Hlag = b.H0
+matrix jzt = b.Jz0
+if full
+  matrix CC = C*C'
+endif
+matrix ScoreCols = ones(1,nparm) ~ vec(lower(ones(n,n)))' ~ ones(1,2*n2)
+matrix N2 = vec(mshape(seq(1,n2),n,n)')
+matrix BoB = B ** B
+loop t = 1..T --quiet
+  matrix Aelag = A*elag'
+  if full
+    matrix Ht = CC + Aelag*Aelag' + qform(B, Hlag)
+    matrix Pt = invpd(Ht)
+  else
+    matrix Pt = unvech(Pts[t,]')
+  endif
+  matrix Xt = (k&gt;0) ? X[t,] : {}
+  matrix et = E[t,]
+  if inmean == 1
+    matrix vecht = full ? vech(Ht)' : Hts[t,]'
+    et -= - Phi*vecht
+  endif
+  matrix ut = et*Pt
+  matrix jlt = (-ut) ~ 0.5*((ut ** ut) - vec(Pt)')
+  # -----
+  matrix Mt = Aelag ** A
+  matrix Mt = (Mt + Mt[N2,]) ~ BoB
+  matrix Ft = (C ~ Aelag*elag ~ B*Hlag) ** I(n)
+  matrix Ft += Ft[N2,]
+  # -----
+  if inmean == 0
+    if k&gt;0
+      matrix Ft = diagcat(-Xt ** I(n), Ft)
+    else
+      matrix Ft = zeros(n,cols(Ft)) | Ft
+    endif
+    matrix Mt = zeros(n, cols(Mt)) | Mt
+  else
+    if k&gt;0
+      matrix Ft = diagcat(-(Xt~vecht') ** I(n), Ft)
+    endif
+    matrix Mt = (-Phi * L_ify(Mt, n)) | Mt
+    matrix Ft[1:n,] -= Phi * L_ify(Ft[n+1:,], n)
+  endif
+  if full
+    Hlag = Ht
+  else
+    Hlag = unvech(Hts[t,]')
+  endif
+  matrix jzt = Mt*jzt + selifc(Ft, ScoreCols)
+  matrix G[t,] = jlt*jzt
+  elag = et
+endloop
+flush
+return total ? sumc(G) : G
+</code>
+</gretl-function>
+<gretl-function name="loglik_T" type="scalar" private="1">
+ <params count="5">
+  <param name="acttheta" type="matrix" const="true"/>
+  <param name="b" type="bundleref"/>
+  <param name="err" type="scalarref"/>
+  <param name="Hts" type="matrixref"/>
+  <param name="Pts" type="matrixref"/>
+ </params>
+<code>loop foreach i n p npar nparm k T inmean --quiet
+  scalar $i = b.$i
+endloop
+set warnings off
+matrix Pi Phi C A B
+# for now
+matrix fulltheta = acttheta
+# matrix fulltheta = Active2Total(acttheta, b.S, b.s)
+BEKK_v2m(fulltheta, n, k, inmean, &amp;Pi, &amp;Phi, &amp;C, &amp;A, &amp;B)
+matrix tmp = eigengen(B)
+check = maxc(sumr(tmp.^2))
+if check &gt; 1
+  scalar err = -1
+  return NA
+endif
+matrix E = (k&gt;0) ? b.Y - b.X*Pi' : b.Y
+UpdatePresampleState(&amp;b, &amp;E, A, B, C)
+matrix et = b.e0
+matrix Ht = b.H0
+matrix jzt = b.Jz0
+matrix CC = C*C'
+lik_const = -.9189385332046727417803297364 * n
+err = 0
+scalar LL = 0
+loop t = 1..T --quiet
+  matrix Aelag = A*et'
+  matrix Ht = CC + Aelag*Aelag' + qform(B, Ht)
+  scalar ldetHt = ldet(Ht)
+  # if detHt &lt;= 1.0e-30
+  #     scalar err = t
+  #     # printf &quot;Nonpd at obs %d\n&quot;, err
+  #     LL = NA
+  #     break
+  # endif
+  Pt = invpd(Ht)
+  Hts[t,] = vech(Ht)'
+  Pts[t,] = vech(Pt)'
+  matrix et = E[t,]
+  if inmean == 1
+    et -= - Phi*vech(Ht)
+  endif
+  LL += lik_const - 0.5*(ldetHt + qform(et, Pt))
+endloop
+return LL
+</code>
+</gretl-function>
+<gretl-function name="Score_T" type="void" private="1">
+ <params count="5">
+  <param name="G" type="matrixref"/>
+  <param name="acttheta" type="matrix" const="true"/>
+  <param name="b" type="bundleref"/>
+  <param name="Hts" type="matrix" const="true"/>
+  <param name="Pts" type="matrix" const="true"/>
+ </params>
+<code>#printf &quot;Score!\n&quot;
+loop foreach i n p npar nparm k T inmean --quiet
+  scalar $i = b.$i
+endloop
+scalar n2 = n*n
+matrix X = b.X
+set warnings off
+matrix G = zeros(1, npar)
+matrix Pi Phi C A B
+# for now
+matrix fulltheta = acttheta
+# matrix fulltheta = Active2Total(acttheta, b.S, b.s)
+BEKK_v2m(fulltheta, n, k, inmean, &amp;Pi, &amp;Phi, &amp;C, &amp;A, &amp;B)
+#     matrix tmp = eigengen(B)
+#     check = maxc(sumr(tmp.^2))
+#     if check &gt; 1
+#         return G
+#     endif
+matrix E = (k&gt;0) ? b.Y - b.X*Pi' : b.Y
+UpdatePresampleState(&amp;b, &amp;E, A, B, C)
+matrix elag = b.e0
+matrix Hlag = b.H0
+matrix jzt = b.Jz0
+matrix ScoreCols = ones(1,nparm) ~ vec(lower(ones(n,n)))' ~ ones(1,2*n2)
+matrix N2 = vec(mshape(seq(1,n2),n,n)')
+matrix BoB = B ** B
+loop t = 1..T --quiet
+  matrix Aelag = A*elag'
+  matrix Pt = unvech(Pts[t,]')
+  matrix Xt = (k&gt;0) ? X[t,] : {}
+  matrix et = E[t,]
+  if inmean == 1
+    matrix vecht = Hts[t,]'
+    et -= - Phi*vecht
+  endif
+  matrix ut = et*Pt
+  matrix jlt = (-ut) ~ 0.5*((ut ** ut) - vec(Pt)')
+  # -----
+  matrix Mt = Aelag ** A
+  matrix Mt = (Mt + Mt[N2,]) ~ BoB
+  matrix Ft = (C ~ Aelag*elag ~ B*Hlag) ** I(n)
+  matrix Ft += Ft[N2,]
+  # -----
+  if inmean == 0
+    if k&gt;0
+      matrix Ft = diagcat(-Xt ** I(n), Ft)
+    else
+      matrix Ft = zeros(n,cols(Ft)) | Ft
+    endif
+    matrix Mt = zeros(n, cols(Mt)) | Mt
+    Hlag = unvech(Hts[t,]')
+  else
+    matrix Ft = diagcat((-X[t,] ~ vecht') ** I(n), Ft)
+    matrix Mt = (-Phi * L_ify(Mt, n)) | Mt
+    matrix Ft[1:n,] -= Phi * L_ify(Ft[n+1:,], n)
+    Hlag = unvech(vecht)
+  endif
+  matrix jzt = Mt*jzt + selifc(Ft, ScoreCols)
+  matrix G += jlt*jzt
+  elag = et
+endloop
+flush
+G = G'
+</code>
+</gretl-function>
+<gretl-function name="BEKK_totscore" type="matrix" private="1">
+ <params count="4">
+  <param name="theta" type="matrix" const="true"/>
+  <param name="b" type="bundleref"/>
+  <param name="H" type="matrix" const="true"/>
+  <param name="P" type="matrix" const="true"/>
+ </params>
+<code>matrix ret = {}
+Score_T(&amp;ret, theta, &amp;b, H, P)
+return ret
+</code>
+</gretl-function>
+<gretl-function name="BEKK_Hessian" type="matrix" private="1">
+ <params count="2">
+  <param name="theta" type="matrix" const="true"/>
+  <param name="b" type="bundleref"/>
+ </params>
+<code>set fdjac_quality 1
+matrix ret = fdjac(theta, &quot;BEKKScore(theta, &amp;b, {}, {}, 1, 1)&quot;)
+ret = -0.5*(ret + ret')
+# check for pd
+if !is_pd(ret)
+  ret = {}
+  printf &quot;Negative Hessian appears not to be pd\n&quot;
+endif
+return ret
+</code>
+</gretl-function>
+<gretl-function name="mat2ser" type="series" private="1">
+ <params count="3">
+  <param name="b" type="bundleref"/>
+  <param name="what" type="string"/>
+  <param name="column" type="scalar"/>
+ </params>
+<code>set warnings off
+series ret = NA
+s = b.smpl
+n = b.n
+matrix X = {}
+if what==&quot;V&quot; || what==&quot;C&quot;
+  X = b.ht
+elif what==&quot;U&quot;
+  X = b.uhat
+elif what==&quot;L&quot;
+  X = b.llt
+endif
+scalar skip = $nobs - rows(X)
+if skip != 0
+  # printf &quot;skip = %d\n&quot;, skip
+  matrix patch = mshape(NA, skip, 1)
+else
+  patch = {}
+endif
+ret = patch | X[,column]
+return ret
+</code>
+</gretl-function>
+<gretl-function name="BEKK_GetCovariance" type="series" private="1">
+ <params count="3">
+  <param name="b" type="bundleref"/>
+  <param name="x" type="scalar"/>
+  <param name="y" type="scalar"/>
+ </params>
+<code>n = b.n
+matrix sel = unvech(seq(1, n*(n+1)/2)')
+scalar e = sel[x,y]
+series c = mat2ser(&amp;b, &quot;C&quot;, e)
+string vn = b.Ynames
+if x==y
+  vn = sprintf(&quot;Conditional variance for %s&quot;,   strsplit(strsub(vn, &quot;,&quot;, &quot; &quot;), x))
+else
+  vn = sprintf(&quot;Conditional covariance for %s and %s&quot;, strsplit(strsub(vn, &quot;,&quot;, &quot; &quot;), x),   strsplit(strsub(vn, &quot;,&quot;, &quot; &quot;), y))
+endif
+setinfo c --description=&quot;@vn&quot;
+return c
+</code>
+</gretl-function>
+<gretl-function name="BEKK_GetResids" type="series" private="1">
+ <params count="3">
+  <param name="b" type="bundleref"/>
+  <param name="x" type="scalar"/>
+  <param name="std" type="bool" default="0"/>
+ </params>
+<code>series u = mat2ser(&amp;b, &quot;U&quot;, x)
+if std
+  series v = BEKK_GetCovariance(&amp;b, x, x)
+  u = u / sqrt(v)
+endif
+string vn = b.Ynames
+string head = std ? &quot;Standardized residual&quot; : &quot;Residual&quot;
+sprintf vn &quot;%s for %s&quot;, head, strsplit(strsub(vn, &quot;,&quot;, &quot; &quot;), x)
+setinfo u --description=&quot;@vn&quot;
+return u
+</code>
+</gretl-function>
+<gretl-function name="BEKK_GetLoglik" type="series" private="1">
+ <params count="1">
+  <param name="b" type="bundleref"/>
+ </params>
+<code>series ret = mat2ser(&amp;b, &quot;L&quot;, 1)
+setinfo ret --description=&quot;Loglikelihood&quot;
+return ret
+</code>
+</gretl-function>
+<gretl-function name="BEKK_SetActive" type="scalar" private="1">
+ <params count="3">
+  <param name="b" type="bundleref"/>
+  <param name="s" type="string"/>
+  <param name="pattern" type="matrix"/>
+ </params>
+<code>scalar errcode = 0
+scalar n = b.n
+scalar k = b.nparm
+scalar n2 = n*n
+scalar m = (n2+n)/2
+if s==&quot;Pi&quot;
+  if n == cols(pattern) &amp;&amp; rows(pattern)*cols(pattern) == k
+    tmp = b.active
+    tmp[1:k] = vec(pattern)
+    b.active = tmp
+  else
+    errcode = 1
+  endif
+elif s==&quot;Phi&quot;
+  if b.inmean == 1 &amp;&amp; n == cols(pattern) &amp;&amp; m == rows(pattern)
+    tmp = b.active
+    tmp[n*k+1 : n*k+n*m] = vec(pattern)
+    b.active = tmp
+  else
+    errcode = 1
+  endif
+elif s==&quot;C&quot;
+  if n == cols(pattern) &amp;&amp; n == rows(pattern)
+    scalar init = b.nparm
+    scalar init += b.inmean ? n*m : 0
+    tmp = b.active
+    tmp[init+1 : init+m] = vech(pattern')
+    b.active = tmp
+  else
+    errcode = 1
+  endif
+elif s==&quot;A&quot;
+  if n == cols(pattern) &amp;&amp; n == rows(pattern)
+    scalar init = b.nparm + m
+    scalar init += b.inmean ? n*m : 0
+    tmp = b.active
+    tmp[init+1 : init+n2] = vec(pattern)
+    b.active = tmp
+  else
+    errcode = 1
+  endif
+elif s==&quot;B&quot;
+  if n == cols(pattern) &amp;&amp; n == rows(pattern)
+    init = b.nparm + m +n2
+    init += b.inmean ? n*m : 0
+    tmp = b.active
+    tmp[init+1 : init+n2] = vec(pattern)
+    b.active = tmp
+  else
+    errcode = 1
+  endif
+else
+  errcode = 2
+endif
+if errcode == 1
+  printf &quot;SetActive error: non-conformable matrix %s\n&quot;, s
+elif errcode == 2
+  printf &quot;SetActive error: unknown string\n&quot;
+endif
+return errcode
+</code>
+</gretl-function>
+<gretl-function name="CovarianceMat" type="matrix" private="1">
+ <params count="1">
+  <param name="mod" type="bundleref"/>
+ </params>
+<code>if !inbundle(mod, &quot;vcvtype&quot;)
+  vcvopt = 3
+elif (mod.vcvtype &lt; 1) || (mod.vcvtype &gt; 3)
+  vcvopt = 3
+else
+  vcvopt = mod.vcvtype
+endif
+DO_OPG = (vcvopt == 1) || (vcvopt ==3)
+DO_HESSIAN = (vcvopt == 2) || (vcvopt ==3)
+if DO_OPG
+  GG = mod.G
+  GG = GG'GG
+endif
+if DO_HESSIAN
+  iH = BEKK_Hessian(mod.coeff, &amp;mod)
+  if rows(iH) == 0
+    # non pd
+    vcvopt = 1
+    mod.vcvtype = 1
+    printf &quot;Switching to OPG\n&quot;
+  else
+    iH = invpd(iH)
+  endif
+endif
+if vcvopt == 1 # OPG
+  ret = invpd(GG)
+elif vcvopt == 2 # inverse Hessian
+  ret = iH
+elif vcvopt == 3 # QML
+  ret = qform(iH, GG)
+else
+  ret = zeros(mod.n, mod.n)
+endif
+return ret
+</code>
+</gretl-function>
+<sample-script filename="MGARCH_Sample.inp">
+# turn off unwanted output
+set echo off
+set messages off
+
+# include package
+include MGARCH.gfn
+
+# --- DATA PREPARATION -----------------------------------------------
+
+# read the dataset
+open IT_companies.gdt --quiet --frompkg=MGARCH
+smpl 2010-01-01 ; 
+list Prices = AAPL RHT 
+
+# compute returns
+list Returns = null
+loop foreach i Prices --quiet
+    series x = ldiff($i)
+    Returns += genseries(sprintf(&quot;r_%s&quot;, &quot;$i&quot;), 100*x)
+endloop
+
+# --- MODEL SETUP AND ESTIMATION -------------------------------------
+
+# setup the BEKK model 
+scalar VAR_lags = 1
+list VAR_exog = const
+bundle Model = BEKK_setup(Returns, VAR_lags, VAR_exog)
+
+# estimate (with moderate verbosity) and print out the results
+# set bfgs_verbskip 25
+
+# uncomment the next line to get OPG std errors (faster)
+# Model.vcvtype = 1
+
+BEKK_estimate(&amp;Model, 10)
+BEKK_printout(&amp;Model)
+
+# --- POSTESTIMATION -------------------------------------------------
+
+# save the loglikelihood
+series llik = GetLoglik(&amp;Model)
+
+# compute the conditional variances
+scalar k = 1
+loop foreach i Prices --quiet
+    series cv_$i = GetVariance(&amp;Model, k++)
+endloop
+
+# get the conditional covariance between series 1 and 2
+series c = GetCovariance(&amp;Model, 1, 2)
+
+# fetch the residuals
+scalar k = 1
+loop foreach i Prices --quiet
+    series u_$i = GetResids(&amp;Model, k++, 1)
+endloop
+</sample-script>
+</gretl-function-package>
+</gretl-functions>

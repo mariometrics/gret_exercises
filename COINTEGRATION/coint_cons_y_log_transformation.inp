@@ -1,0 +1,59 @@
+open cons_gdp.gdt
+
+## preliminar transformation
+series y = log(gdp)
+series c = log(pcec)
+
+## Unit Roots Tests
+adf 12 y --c --ct --ctt --test-down
+kpss 6 y --trend
+PPtest(y,2,0,1)
+
+adf 12 c --c --ct --ctt --test-down
+kpss 6 c --trend
+PPtest(c,2,0,1)
+
+## lag selection
+var 15 c y --lagselect
+## q = 3 for BIC, HQC
+
+## Engle e Granger
+
+coint 3 c y --skip-df # only constant
+
+coint 3 c y --ct --skip-df # const + trend
+
+coint 3 c y --ctt --skip-df #const + quadratic trend
+
+## with E G procedure we have evidences of a cointegration relationship in all of three cases
+
+## Johansen procedure 
+
+coint2 3 c y --uc ## unrestricted constant case 3 
+
+coint2 3 c y --crt ## unrestricted constant + restricted trend case 4 
+
+coint2 3 c y --ct ## unrestricted constant + unrestricted trend case 5
+
+## r = 1 more consistent with the case 3, but also the other two cases are interesting
+
+## vecm with q=3 , r=1 and unrestricted constant case 3 
+vecm 3 1 c y --uc
+
+restrict  --full --verbose
+    b[1]=1
+    b[2]=-1 # ----> b[2]=-1 is rejected 
+end restrict
+
+## vecm with q=3 , r=1 and unrestricted constant + restricted trend case 4 
+
+vecm 3 1 c y --crt 
+
+restrict  --full --verbose
+    b[1]=1
+    b[2]=-0.8 #-0.7 , -0.75 ecc. ----> b[2]=-0.8 pvalue over 5% but very little
+end restrict
+
+## vecm with q=2 , r=1 and unrestricted constant + trend case 5 
+
+vecm 3 1 c y --ct

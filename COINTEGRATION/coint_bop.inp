@@ -1,0 +1,27 @@
+### Es VAR coint su imp e exp (bilancia commerciale)
+open ImpExp_USA.gdt
+
+smpl 1970:1
+
+# Unit Roots tests
+adf 12 impgs --c --ct --ctt --test-down
+kpss 6 impgs --trend
+PPtest(impgs,2,0,1)
+
+adf 12 expgs --c --ct --ctt --test-down
+kpss 6 expgs --trend
+PPtest(expgs,2,0,1)
+
+## VAR lag selection 
+var 13 expgs impgs --lagselect
+## q = 5 per HQC
+
+## Engle e Granger cointegration
+coint 5 expgs impgs ## no evidence of cointegration relationship 
+
+# Johansen procedure 
+coint2 5 expgs impgs --uc #(case 3 --uc) but case 4 (--crt) is also probable
+
+
+## NO EVIDENCE OF ANY COINTEGRATION RELATIONSHIP 
+
