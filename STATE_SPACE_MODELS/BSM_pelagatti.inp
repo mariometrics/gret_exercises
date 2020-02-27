@@ -1,0 +1,65 @@
+/*
+Gretl code to define and estimate a BSM on the log-airline data
+Pelagatti, Matteo (2016) "Time Series modelling with unobserved components" 
+Pag. 233 
+Code adapted to 2020a-git version of gretl 
+*/
+set echo off
+
+open bjg.gdt --quiet # open airline data
+genr lair = log(g) # create log-airline
+
+# initial values for std. deviations
+scalar sdeta = 0.1
+scalar sdzeta = 0.1
+scalar sdomega = 0.1
+scalar sdeps = 0.1
+
+# State equation matrices
+matrix T = zeros(13,13) # -- Local linear trend
+T[1,1] = 1
+T[1,2] = 1
+T[2,2] = 1
+
+# -- Stochastic dummy seasonal component
+T[3,3:13] = -1
+T[4:13,3:12] = I(10)
+matrix Q = zeros(13,13)
+
+# Observation equation matrices
+matrix Z = zeros(13,1)
+Z[1,1] = 1
+Z[3,1] = 1
+matrix H = {sdeps^2}
+
+# Initial conditions
+matrix a1 = zeros(13,1)
+a1[1,1] = lair[1]
+
+# Definition of the state space form
+bundle kb = ksetup(lair,Z,T,Q)
+kb.obsvar = H
+kb.inistate = a1 
+kb.diffuse = 1 # set diffuse prior
+
+# Maximum likelihood estimation
+mle ll = ERR ? NA : kb.llt
+# assign variances to right matrix positions
+kb.statevar[1,1] = sdeta^2
+kb.statevar[2,2] = sdzeta^2
+kb.statevar[3,3] = sdomega^2
+kb.obsvar[1,1] = sdeps^2
+ERR = kfilter(&kb)
+params sdeta sdzeta sdomega sdeps
+end mle
+
+# Smoothing
+ksmooth(&kb)
+matrix ret = kb.state
+# Plot series and trend
+series trend = ret[,1]
+# series from smooth trend
+setinfo lair -n "log-airline"
+# label to plot for lair
+setinfo trend -n "smoothed trend" # label to plot for trend
+gnuplot lair trend time --with-lines --output=display
