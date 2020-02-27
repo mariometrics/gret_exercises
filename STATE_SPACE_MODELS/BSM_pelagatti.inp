@@ -1,6 +1,6 @@
 /*
    Gretl code to define and estimate a BSM on the log-airline data
-   Pelagatti, Matteo (2016) "Time Series modelling with unobserved components"
+   Pelagatti, Matteo (2015) "Time Series modelling with unobserved components"
    Pag. 233
    Code adapted to 2020a-git version of gretl
 */
