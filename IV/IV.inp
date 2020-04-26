@@ -1,0 +1,48 @@
+/*
+An exercise on Instrental Variable Estimation that I made for the 
+MOOC Econometrics, provided by the Erasmus University, Rotterdam
+
+Mario Marchetti 2020-04-26
+*/
+
+clear 
+set verbose off 
+#set messages off 
+open "logwage.xls"
+# (a)
+series exper2 = exper^2 
+series age2 = age^2
+ols logw const educ exper exper2 smsa south
+
+## TSLS 
+# Instruments 
+list Z_star = age age2 nearc daded momed
+list X_eso = smsa south 
+list Z = Z_star X_eso
+
+# first stage educ
+ols educ const Z -q
+yhat_educ = $yhat
+# first stage exper and exper2
+ols exper const Z -q
+yhat_exper = $yhat 
+ols exper2 const Z -q
+yhat_exper2 = $yhat 
+list X_hat = yhat* X_eso
+
+# second stage 
+ols logw const X_hat
+beta_tsls = $coeff
+
+## Sargan test
+series e_tsls = logw - {const,educ,exper,exper2,smsa,south}*beta_tsls
+ols e_tsls const Z -q 
+Tstat = $nobs*$rsq
+df = (nelem(Z) - 5)
+printf "Sargan Test for orthogonality of instruments\n\
+ \tchi-square(%g) = %.4g\n \tp-value: %.4g\n",df , Tstat, (pvalue(X,df,Tstat)) 
+
+# compare with the pre-build gretl function 
+tsls logw const educ exper exper2 X_eso; Z # same result 
+
+printf "I've obtained the same result! Goodbye"
